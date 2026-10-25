@@ -543,6 +543,17 @@ function createSocketServer({
   return { httpServer, io, connectedUsers };
 }
 
+function handleHealth(req, res) {
+  if (req.url === "/health" && req.method === "GET") {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ status: "ok" }));
+    return true; // handled
+  }
+  return false;
+}
+
+
+
 function parsePort(value = process.env.PORT || "3001") {
   const port = Number(value);
 
@@ -586,5 +597,6 @@ module.exports = {
   getIceServers,
   parseAllowedOrigins,
   parsePort,
-  startServer
+  startServer,
+  healthCheck
 };
