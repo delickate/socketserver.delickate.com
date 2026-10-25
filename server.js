@@ -12,7 +12,7 @@ const DEFAULT_ORIGINS = [
   "http://localhost:19006"
 ];
 
-function getApiBaseUrl(value = process.env.LARAVEL_API_URL || "http://127.0.0.1:8000/api") {
+function getApiBaseUrl(value = process.env.LARAVEL_API_URL || "https://api.sanjakarobar.com/api") {
   let parsedUrl;
 
   try {
