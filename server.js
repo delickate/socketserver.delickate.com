@@ -1,6 +1,14 @@
 "use strict";
 
-require("dotenv").config({ path: "/absolute/path/to/.env" });
+// Load .env from the app directory, regardless of where PM2 launched us from.
+// Falls back to default CWD lookup if the explicit path is wrong.
+const path = require("node:path");
+const dotenvResult = require("dotenv").config({
+  path: process.env.ENV_FILE || path.join(__dirname, ".env"),
+});
+if (dotenvResult.error && dotenvResult.error.code !== "ENOENT") {
+  console.error("Failed to load .env:", dotenvResult.error.message);
+}
 
 const http = require("node:http");
 const { Server } = require("socket.io");
@@ -9,66 +17,84 @@ const DEFAULT_ORIGINS = [
   "http://localhost:3000",
   "http://localhost:5173",
   "http://localhost:8081",
-  "http://localhost:19006"
+  "http://localhost:19006",
 ];
 
 function getApiBaseUrl(value = process.env.LARAVEL_API_URL || "https://api.sanjakarobar.com/api") {
+  const trimmed = String(value).trim();
   let parsedUrl;
 
   try {
-    parsedUrl = new URL(value);
+    parsedUrl = new URL(trimmed);
   } catch {
-    throw new Error(`Invalid LARAVEL_API_URL: ${value}`);
+    throw new Error(`Invalid LARAVEL_API_URL: ${JSON.stringify(value)}`);
   }
 
-  if (!["http:", "https:"].includes(parsedUrl.protocol) || !parsedUrl.pathname.replace(/\/+$/, "").endsWith("/api")) {
-    throw new Error("LARAVEL_API_URL must be an HTTP(S) URL ending in /api");
+  const normalizedPath = parsedUrl.pathname.replace(/\/+$/, "");
+  if (
+    !["http:", "https:"].includes(parsedUrl.protocol) ||
+    !normalizedPath.endsWith("/api")
+  ) {
+    throw new Error(
+      `LARAVEL_API_URL must be an HTTP(S) URL ending in /api (got ${JSON.stringify(value)})`
+    );
   }
 
-  return value.replace(/\/+$/, "");
+  return trimmed.replace(/\/+$/, "");
 }
 
 function parseAllowedOrigins(value = process.env.CORS_ORIGINS) {
-  if (value === undefined) {
+  if (value === undefined || value === "") {
     return DEFAULT_ORIGINS;
   }
 
-  return value.split(",").map((origin) => origin.trim()).filter(Boolean).map((origin) => {
-    let parsedOrigin;
+  return value
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean)
+    .map((origin) => {
+      let parsedOrigin;
 
-    try {
-      parsedOrigin = new URL(origin);
-    } catch {
-      throw new Error(`Invalid CORS origin: ${origin}`);
-    }
+      try {
+        parsedOrigin = new URL(origin);
+      } catch {
+        throw new Error(`Invalid CORS origin: ${origin}`);
+      }
 
-    if (
-      !["http:", "https:"].includes(parsedOrigin.protocol) ||
-      parsedOrigin.origin !== origin
-    ) {
-      throw new Error(`CORS entries must be origins without paths: ${origin}`);
-    }
+      if (
+        !["http:", "https:"].includes(parsedOrigin.protocol) ||
+        parsedOrigin.origin !== origin
+      ) {
+        throw new Error(`CORS entries must be origins without paths: ${origin}`);
+      }
 
-    return origin;
-  });
+      return origin;
+    });
 }
 
 function getIceServers({
   stunUrls = process.env.STUN_SERVER_URLS || "stun:stun.l.google.com:19302",
   turnUrls = process.env.TURN_SERVER_URLS || "",
   turnUsername = process.env.TURN_SERVER_USERNAME || "",
-  turnCredential = process.env.TURN_SERVER_CREDENTIAL || ""
+  turnCredential = process.env.TURN_SERVER_CREDENTIAL || "",
 } = {}) {
-  const urls = (value, label) => value.split(",").map((url) => url.trim()).filter(Boolean).map((url) => {
-    if (!/^(stun|stuns|turn|turns):[^\s]+$/i.test(url)) {
-      throw new Error(`Invalid ${label} URL: ${url}`);
-    }
-    return url;
-  });
+  const urls = (value, label) =>
+    value
+      .split(",")
+      .map((url) => url.trim())
+      .filter(Boolean)
+      .map((url) => {
+        if (!/^(stun|stuns|turn|turns):[^\s]+$/i.test(url)) {
+          throw new Error(`Invalid ${label} URL: ${url}`);
+        }
+        return url;
+      });
+
   const stunServerUrls = urls(stunUrls, "STUN");
   if (!stunServerUrls.every((url) => /^(stun|stuns):/i.test(url))) {
     throw new Error("STUN_SERVER_URLS may contain only stun: or stuns: URLs");
   }
+
   const servers = stunServerUrls.map((url) => ({ urls: url }));
   const turnServerUrls = urls(turnUrls, "TURN");
 
@@ -77,12 +103,14 @@ function getIceServers({
       throw new Error("TURN_SERVER_URLS may contain only turn: or turns: URLs");
     }
     if (!turnUsername || !turnCredential) {
-      throw new Error("TURN_SERVER_USERNAME and TURN_SERVER_CREDENTIAL are required when TURN_SERVER_URLS is set");
+      throw new Error(
+        "TURN_SERVER_USERNAME and TURN_SERVER_CREDENTIAL are required when TURN_SERVER_URLS is set"
+      );
     }
     servers.push({
       urls: turnServerUrls,
       username: turnUsername,
-      credential: turnCredential
+      credential: turnCredential,
     });
   } else if (turnUsername || turnCredential) {
     throw new Error("TURN_SERVER_URLS is required when TURN credentials are set");
@@ -94,31 +122,52 @@ function getIceServers({
   return servers;
 }
 
+function parsePort(value = process.env.PORT || "3001") {
+  const port = Number(value);
+
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    throw new Error(`Invalid PORT value: ${value}`);
+  }
+
+  return port;
+}
+
 function createSocketServer({
   allowedOrigins = parseAllowedOrigins(),
   apiBaseUrl = getApiBaseUrl(),
   iceServers = getIceServers(),
-  fetchImpl = globalThis.fetch
+  fetchImpl = globalThis.fetch,
 } = {}) {
   const originSet = new Set(allowedOrigins);
   const connectedUsers = new Map();
   const calls = new Map();
   const callsByUser = new Map();
-  const httpServer = http.createServer((request, response) => {
-    const pathname = new URL(request.url || "/", "http://localhost").pathname;
 
+  const httpServer = http.createServer((request, response) => {
+    let pathname;
+    try {
+      pathname = new URL(request.url || "/", "http://localhost").pathname;
+    } catch {
+      response.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify({ error: "Bad request" }));
+      return;
+    }
+
+    // /health — self-contained, no dependencies, always answerable.
     if (request.method === "GET" && pathname === "/health") {
+      const body = JSON.stringify({ status: "ok" });
       response.writeHead(200, {
         "Content-Type": "application/json; charset=utf-8",
-        "Cache-Control": "no-store"
+        "Content-Length": Buffer.byteLength(body),
+        "Cache-Control": "no-store",
       });
-      response.end(JSON.stringify({ status: "ok" }));
+      response.end(body);
       return;
     }
 
     response.writeHead(404, {
       "Content-Type": "application/json; charset=utf-8",
-      "Cache-Control": "no-store"
+      "Cache-Control": "no-store",
     });
     response.end(JSON.stringify({ error: "Not found" }));
   });
@@ -134,24 +183,25 @@ function createSocketServer({
           callback(null, true);
           return;
         }
-
         callback(new Error("Origin not allowed"));
       },
-      methods: ["GET", "POST"]
-    }
+      methods: ["GET", "POST"],
+    },
   });
 
-  async function apiGet(path, token) {
-    const response = await fetchImpl(`${apiBaseUrl}${path}`, {
+  async function apiGet(apiPath, token) {
+    const response = await fetchImpl(`${apiBaseUrl}${apiPath}`, {
       headers: {
         Accept: "application/json",
-        Authorization: `Bearer ${token}`
+        Authorization: `Bearer ${token}`,
       },
-      signal: AbortSignal.timeout(5000)
+      signal: AbortSignal.timeout(5000),
     });
 
     if (!response.ok) {
-      const error = new Error(`Laravel API rejected socket request (${response.status})`);
+      const error = new Error(
+        `Laravel API rejected socket request (${response.status})`
+      );
       error.status = response.status;
       throw error;
     }
@@ -170,7 +220,7 @@ function createSocketServer({
     try {
       const [user, friendResponse] = await Promise.all([
         apiGet("/auth/socket-identity", token),
-        apiGet("/friends", token)
+        apiGet("/friends", token),
       ]);
       const userId = Number(user.id);
       const friends = friendResponse.data;
@@ -179,20 +229,19 @@ function createSocketServer({
         throw new Error("Laravel returned an invalid socket identity or friend list");
       }
 
-      socket.data.user = {
-        id: userId,
-        name: user.name
-      };
+      socket.data.user = { id: userId, name: user.name };
       socket.data.friendIds = friends
         .map((friend) => Number(friend.id))
-        .filter((friendId) => Number.isSafeInteger(friendId) && friendId !== userId);
+        .filter(
+          (friendId) =>
+            Number.isSafeInteger(friendId) && friendId !== userId
+        );
       next();
     } catch (error) {
       if (error.status === 401) {
         next(new Error("Authentication failed"));
         return;
       }
-
       console.error("Socket authentication failed:", error.message);
       next(new Error("Unable to authenticate with the Laravel API"));
     }
@@ -235,16 +284,19 @@ function createSocketServer({
     connectedUsers.set(userId, userSockets);
     socket.join(userRoom);
 
-    socket.emit("presence:sync", socket.data.friendIds.map((friendId) => ({
-      user_id: friendId,
-      is_online: (connectedUsers.get(friendId)?.size || 0) > 0
-    })));
+    socket.emit(
+      "presence:sync",
+      socket.data.friendIds.map((friendId) => ({
+        user_id: friendId,
+        is_online: (connectedUsers.get(friendId)?.size || 0) > 0,
+      }))
+    );
 
     if (becameOnline) {
       for (const friendId of socket.data.friendIds) {
         io.to(`user:${friendId}`).emit("presence:update", {
           user_id: userId,
-          is_online: true
+          is_online: true,
         });
       }
     }
@@ -255,12 +307,13 @@ function createSocketServer({
         clearTimeout(timeout);
         typingTimers.delete(conversationId);
       }
-
       if (socket.rooms.has(`conversation:${conversationId}`)) {
-        socket.to(`conversation:${conversationId}`).emit("conversation:stop-typing", {
-          conversation_id: conversationId,
-          user_id: userId
-        });
+        socket
+          .to(`conversation:${conversationId}`)
+          .emit("conversation:stop-typing", {
+            conversation_id: conversationId,
+            user_id: userId,
+          });
       }
     }
 
@@ -277,7 +330,10 @@ function createSocketServer({
       }
 
       try {
-        const access = await apiGet(`/conversations/${conversationId}/socket-access`, socket.handshake.auth.token);
+        const access = await apiGet(
+          `/conversations/${conversationId}/socket-access`,
+          socket.handshake.auth.token
+        );
 
         if (Number(access.conversation_id) !== conversationId) {
           socket.emit("server:error", { message: "Conversation access denied." });
@@ -285,21 +341,27 @@ function createSocketServer({
         }
 
         socket.join(`conversation:${conversationId}`);
-        socket.emit("conversation:joined", { conversation_id: conversationId });
+        socket.emit("conversation:joined", {
+          conversation_id: conversationId,
+        });
       } catch (error) {
         if (error.status === 401) {
-          socket.emit("server:error", { message: "Your session has expired. Sign in again." });
+          socket.emit("server:error", {
+            message: "Your session has expired. Sign in again.",
+          });
           socket.disconnect(true);
           return;
         }
-
         if (error.status === 404 || error.status === 403) {
-          socket.emit("server:error", { message: "You do not have access to this conversation." });
+          socket.emit("server:error", {
+            message: "You do not have access to this conversation.",
+          });
           return;
         }
-
         console.error("Conversation authorization failed:", error.message);
-        socket.emit("server:error", { message: "Could not authorize the conversation." });
+        socket.emit("server:error", {
+          message: "Could not authorize the conversation.",
+        });
       }
     });
 
@@ -315,23 +377,32 @@ function createSocketServer({
     socket.on("conversation:typing", (payload) => {
       const conversationId = Number(payload?.conversation_id);
 
-      if (!Number.isSafeInteger(conversationId) || !socket.rooms.has(`conversation:${conversationId}`)) {
+      if (
+        !Number.isSafeInteger(conversationId) ||
+        !socket.rooms.has(`conversation:${conversationId}`)
+      ) {
         return;
       }
 
       socket.to(`conversation:${conversationId}`).emit("conversation:typing", {
         conversation_id: conversationId,
         user_id: userId,
-        name: socket.data.user.name
+        name: socket.data.user.name,
       });
       clearTimeout(typingTimers.get(conversationId));
-      typingTimers.set(conversationId, setTimeout(() => stopTyping(conversationId), 4000));
+      typingTimers.set(
+        conversationId,
+        setTimeout(() => stopTyping(conversationId), 4000)
+      );
     });
 
     socket.on("conversation:stop-typing", (payload) => {
       const conversationId = Number(payload?.conversation_id);
 
-      if (!Number.isSafeInteger(conversationId) || !socket.rooms.has(`conversation:${conversationId}`)) {
+      if (
+        !Number.isSafeInteger(conversationId) ||
+        !socket.rooms.has(`conversation:${conversationId}`)
+      ) {
         return;
       }
 
@@ -363,7 +434,10 @@ function createSocketServer({
         !["audio", "video"].includes(mediaType) ||
         !socket.rooms.has(`conversation:${conversationId}`)
       ) {
-        socket.emit("call:error", { call_id: callId, message: "This call could not be started." });
+        socket.emit("call:error", {
+          call_id: callId,
+          message: "This call could not be started.",
+        });
         return;
       }
 
@@ -380,33 +454,49 @@ function createSocketServer({
         targetUserId,
         targetSocketIds: new Set(),
         acceptedSocketId: null,
-        timeout: null
+        timeout: null,
       };
       calls.set(callId, call);
       callsByUser.set(userId, callId);
       callsByUser.set(targetUserId, callId);
 
       try {
-        const access = await apiGet(`/conversations/${conversationId}/socket-access`, socket.handshake.auth.token);
-        if (Number(access.conversation_id) !== conversationId ||
-          Number(access.peer_id) !== targetUserId) {
+        const access = await apiGet(
+          `/conversations/${conversationId}/socket-access`,
+          socket.handshake.auth.token
+        );
+        if (
+          Number(access.conversation_id) !== conversationId ||
+          Number(access.peer_id) !== targetUserId
+        ) {
           removeCall(call);
-          socket.emit("call:error", { call_id: callId, message: "Conversation access denied." });
+          socket.emit("call:error", {
+            call_id: callId,
+            message: "Conversation access denied.",
+          });
           return;
         }
       } catch (error) {
         removeCall(call);
         if (error.status === 401) {
-          socket.emit("server:error", { message: "Your session has expired. Sign in again." });
+          socket.emit("server:error", {
+            message: "Your session has expired. Sign in again.",
+          });
           socket.disconnect(true);
           return;
         }
         if (error.status === 403 || error.status === 404) {
-          socket.emit("call:error", { call_id: callId, message: "You do not have access to this conversation." });
+          socket.emit("call:error", {
+            call_id: callId,
+            message: "You do not have access to this conversation.",
+          });
           return;
         }
         console.error("Call authorization failed:", error.message);
-        socket.emit("call:error", { call_id: callId, message: "Could not authorize this call." });
+        socket.emit("call:error", {
+          call_id: callId,
+          message: "Could not authorize this call.",
+        });
         return;
       }
 
@@ -417,18 +507,29 @@ function createSocketServer({
       } catch (error) {
         removeCall(call);
         console.error("Call recipient lookup failed:", error.message);
-        socket.emit("call:error", { call_id: callId, message: "Could not reach your friend for this call." });
+        socket.emit("call:error", {
+          call_id: callId,
+          message: "Could not reach your friend for this call.",
+        });
         return;
       }
       if (calls.get(callId) !== call) return;
-      const availableSockets = targetSockets.filter((targetSocket) => targetSocket.data.callingEnabled);
+
+      const availableSockets = targetSockets.filter(
+        (targetSocket) => targetSocket.data.callingEnabled
+      );
       if (availableSockets.length === 0) {
         removeCall(call);
-        socket.emit("call:unavailable", { call_id: callId, user_id: targetUserId });
+        socket.emit("call:unavailable", {
+          call_id: callId,
+          user_id: targetUserId,
+        });
         return;
       }
 
-      call.targetSocketIds = new Set(availableSockets.map((targetSocket) => targetSocket.id));
+      call.targetSocketIds = new Set(
+        availableSockets.map((targetSocket) => targetSocket.id)
+      );
       call.timeout = setTimeout(() => {
         finishCall(call, "call:timeout");
       }, 30_000);
@@ -439,15 +540,20 @@ function createSocketServer({
           conversation_id: conversationId,
           caller_id: userId,
           caller_name: socket.data.user.name,
-          media_type: mediaType
+          media_type: mediaType,
         });
       }
     });
 
     socket.on("call:accept", (payload) => {
       const call = getCall(payload?.call_id);
-      if (!call || call.targetUserId !== userId ||
-        !call.targetSocketIds.has(socket.id) || call.acceptedSocketId) return;
+      if (
+        !call ||
+        call.targetUserId !== userId ||
+        !call.targetSocketIds.has(socket.id) ||
+        call.acceptedSocketId
+      )
+        return;
 
       clearTimeout(call.timeout);
       call.timeout = null;
@@ -455,27 +561,44 @@ function createSocketServer({
       io.to(call.callerSocketId).emit("call:accepted", { call_id: call.id });
       for (const targetSocketId of call.targetSocketIds) {
         if (targetSocketId !== socket.id) {
-          io.to(targetSocketId).emit("call:answered-elsewhere", { call_id: call.id });
+          io.to(targetSocketId).emit("call:answered-elsewhere", {
+            call_id: call.id,
+          });
         }
       }
     });
 
     socket.on("call:reject", (payload) => {
       const call = getCall(payload?.call_id);
-      if (!call || call.targetUserId !== userId ||
-        !call.targetSocketIds.has(socket.id) || call.acceptedSocketId) return;
+      if (
+        !call ||
+        call.targetUserId !== userId ||
+        !call.targetSocketIds.has(socket.id) ||
+        call.acceptedSocketId
+      )
+        return;
       finishCall(call, "call:rejected");
     });
 
     socket.on("call:cancel", (payload) => {
       const call = getCall(payload?.call_id);
-      if (!call || call.callerSocketId !== socket.id || call.acceptedSocketId) return;
+      if (
+        !call ||
+        call.callerSocketId !== socket.id ||
+        call.acceptedSocketId
+      )
+        return;
       finishCall(call, "call:ended");
     });
 
     socket.on("call:end", (payload) => {
       const call = getCall(payload?.call_id);
-      if (!call || (call.callerSocketId !== socket.id && call.acceptedSocketId !== socket.id)) return;
+      if (
+        !call ||
+        (call.callerSocketId !== socket.id &&
+          call.acceptedSocketId !== socket.id)
+      )
+        return;
       finishCall(call, "call:ended");
     });
 
@@ -485,8 +608,15 @@ function createSocketServer({
       const isCaller = call?.callerSocketId === socket.id;
       const isAcceptedTarget = call?.acceptedSocketId === socket.id;
 
-      if (!call || !call.acceptedSocketId || (!isCaller && !isAcceptedTarget) ||
-        !signal || typeof signal !== "object" || Array.isArray(signal)) return;
+      if (
+        !call ||
+        !call.acceptedSocketId ||
+        (!isCaller && !isAcceptedTarget) ||
+        !signal ||
+        typeof signal !== "object" ||
+        Array.isArray(signal)
+      )
+        return;
 
       let serialized;
       try {
@@ -496,7 +626,9 @@ function createSocketServer({
       }
       if (serialized.length > 64_000) return;
 
-      const destination = isCaller ? call.acceptedSocketId : call.callerSocketId;
+      const destination = isCaller
+        ? call.acceptedSocketId
+        : call.callerSocketId;
       io.to(destination).emit("call:signal", { call_id: call.id, signal });
     });
 
@@ -511,7 +643,10 @@ function createSocketServer({
         const call = calls.get(callId);
         if (!call) continue;
 
-        if (call.callerSocketId === socket.id || call.acceptedSocketId === socket.id) {
+        if (
+          call.callerSocketId === socket.id ||
+          call.acceptedSocketId === socket.id
+        ) {
           finishCall(call, "call:ended");
         } else {
           call.targetSocketIds.delete(socket.id);
@@ -522,10 +657,7 @@ function createSocketServer({
       }
 
       const sockets = connectedUsers.get(userId);
-
-      if (!sockets) {
-        return;
-      }
+      if (!sockets) return;
 
       sockets.delete(socket.id);
       if (sockets.size === 0) {
@@ -533,7 +665,7 @@ function createSocketServer({
         for (const friendId of socket.data.friendIds) {
           io.to(`user:${friendId}`).emit("presence:update", {
             user_id: userId,
-            is_online: false
+            is_online: false,
           });
         }
       }
@@ -543,52 +675,35 @@ function createSocketServer({
   return { httpServer, io, connectedUsers };
 }
 
-function handleHealth(req, res) {
-  if (req.method !== "GET" || req.url !== "/health") return false;
-
-  console.log("[health] handler entered");
-
+/**
+ * Programmatic liveness check — pings the running server's own /health endpoint.
+ * Use this from monitoring / startup scripts. It is NOT an HTTP handler.
+ */
+async function healthCheck(port = parsePort()) {
   try {
-    const body = JSON.stringify({ status: "ok" });
-    console.log("[health] writing headers");
-    res.writeHead(200, {
-      "Content-Type": "application/json; charset=utf-8",
-      "Content-Length": Buffer.byteLength(body),   // ← avoids chunked
+    const res = await fetch(`http://127.0.0.1:${port}/health`, {
+      signal: AbortSignal.timeout(2000),
     });
-    console.log("[health] writing body");
-    res.end(body);
-    console.log("[health] done");
-  } catch (err) {
-    console.error("[health] error:", err);
-    if (!res.headersSent) {
-      res.writeHead(500).end("error");
-    } else {
-      res.end(); // at least close the response
-    }
+    return res.ok;
+  } catch {
+    return false;
   }
-  return true;
-}
-
-
-
-function parsePort(value = process.env.PORT || "3001") {
-  const port = Number(value);
-
-  if (!Number.isInteger(port) || port < 0 || port > 65535) {
-    throw new Error(`Invalid PORT value: ${value}`);
-  }
-
-  return port;
 }
 
 async function startServer() {
-  const { httpServer, io } = createSocketServer();
+  // Validate config BEFORE binding a port. If any of these throws,
+  // the process fails to start cleanly instead of binding a half-ready server.
   const port = parsePort();
   const host = process.env.HOST || "0.0.0.0";
 
+  const { httpServer, io } = createSocketServer();
+
   await new Promise((resolve, reject) => {
     httpServer.once("error", reject);
-    httpServer.listen(port, host, resolve);
+    httpServer.listen(port, host, () => {
+      httpServer.removeListener("error", reject);
+      resolve();
+    });
   });
 
   const address = httpServer.address();
@@ -599,11 +714,13 @@ async function startServer() {
       io.close(() => process.exit(0));
     });
   }
+
+  return { httpServer, io };
 }
 
 if (require.main === module) {
   startServer().catch((error) => {
-    console.error("Failed to start socket server:", error);
+    console.error("Failed to start socket server:", error.message);
     process.exitCode = 1;
   });
 }
@@ -615,5 +732,5 @@ module.exports = {
   parseAllowedOrigins,
   parsePort,
   startServer,
-  handleHealth
+  healthCheck,
 };
