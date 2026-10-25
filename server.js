@@ -615,5 +615,5 @@ module.exports = {
   parseAllowedOrigins,
   parsePort,
   startServer,
-  healthCheck
+  handleHealth
 };
