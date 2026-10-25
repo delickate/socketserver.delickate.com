@@ -1,6 +1,6 @@
 "use strict";
 
-require("dotenv").config();
+require("dotenv").config({ path: "/absolute/path/to/.env" });
 
 const http = require("node:http");
 const { Server } = require("socket.io");
