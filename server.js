@@ -153,6 +153,22 @@ function createSocketServer({
       return;
     }
 
+    if (request.method === "GET" && pathname === "/") {
+      const body = JSON.stringify({
+        service: "socket-server",
+        status: "ok",
+        health: "/health",
+        socket: "/socket.io/",
+      });
+      response.writeHead(200, {
+        "Content-Type": "application/json; charset=utf-8",
+        "Content-Length": Buffer.byteLength(body),
+        "Cache-Control": "no-store",
+      });
+      response.end(body);
+      return;
+    }
+
     // /health — self-contained, no dependencies, always answerable.
     if (request.method === "GET" && pathname === "/health") {
       const body = JSON.stringify({ status: "ok" });
