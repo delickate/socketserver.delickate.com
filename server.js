@@ -544,12 +544,29 @@ function createSocketServer({
 }
 
 function handleHealth(req, res) {
-  if (req.url === "/health" && req.method === "GET") {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ status: "ok" }));
-    return true; // handled
+  if (req.method !== "GET" || req.url !== "/health") return false;
+
+  console.log("[health] handler entered");
+
+  try {
+    const body = JSON.stringify({ status: "ok" });
+    console.log("[health] writing headers");
+    res.writeHead(200, {
+      "Content-Type": "application/json; charset=utf-8",
+      "Content-Length": Buffer.byteLength(body),   // ← avoids chunked
+    });
+    console.log("[health] writing body");
+    res.end(body);
+    console.log("[health] done");
+  } catch (err) {
+    console.error("[health] error:", err);
+    if (!res.headersSent) {
+      res.writeHead(500).end("error");
+    } else {
+      res.end(); // at least close the response
+    }
   }
-  return false;
+  return true;
 }
 
 
