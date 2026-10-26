@@ -128,13 +128,14 @@ function getIceServers({
   return servers;
 }
 
-function parsePort(value = process.env.PORT || "3000") {
+function parsePort(value = process.env.PORT) {
+  if (value === undefined || value === "") {
+    throw new Error("PORT is not set — check .env and dotenv loading");
+  }
   const port = Number(value);
-
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     throw new Error(`Invalid PORT value: ${value}`);
   }
-
   return port;
 }
 
