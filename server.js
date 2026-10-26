@@ -122,7 +122,7 @@ function getIceServers({
   return servers;
 }
 
-function parsePort(value = process.env.PORT || "3001") {
+function parsePort(value = process.env.PORT || "3000") {
   const port = Number(value);
 
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
