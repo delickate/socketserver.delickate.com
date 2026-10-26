@@ -3,12 +3,18 @@
 // Load .env from the app directory, regardless of where PM2 launched us from.
 // Falls back to default CWD lookup if the explicit path is wrong.
 const path = require("node:path");
-const dotenvResult = require("dotenv").config({
-  path: process.env.ENV_FILE || path.join(__dirname, ".env"),
-});
-if (dotenvResult.error && dotenvResult.error.code !== "ENOENT") {
-  console.error("Failed to load .env:", dotenvResult.error.message);
+const envPath = process.env.ENV_FILE || path.join(__dirname, ".env");
+const dotenvResult = require("dotenv").config({ path: envPath, override: true });
+if (dotenvResult.error) {
+  throw new Error(
+    `Failed to load .env at ${envPath}: ${dotenvResult.error.message} (code=${dotenvResult.error.code})`
+  );
 }
+console.log(
+  `[boot] dotenv loaded ${envPath} | PORT=${JSON.stringify(process.env.PORT)} | LARAVEL_API_URL=${
+    process.env.LARAVEL_API_URL ? "set" : "unset"
+  }`
+);
 
 const http = require("node:http");
 const { Server } = require("socket.io");
