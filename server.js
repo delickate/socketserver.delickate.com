@@ -20,10 +20,10 @@ const http = require("node:http");
 const { Server } = require("socket.io");
 
 const DEFAULT_ORIGINS = [
-  "http://localhost:3000",
-  "http://localhost:5173",
-  "http://localhost:8081",
-  "http://localhost:19006",
+  "https://socket.sanjakarobar.com:3000",
+  "https://socket.sanjakarobar.com:5173",
+  "https://socket.sanjakarobar.com:8081",
+  "https://socket.sanjakarobar.com:19006",
 ];
 
 function getApiBaseUrl(value = process.env.LARAVEL_API_URL || "https://api.sanjakarobar.com/api") {
@@ -153,7 +153,7 @@ function createSocketServer({
   const httpServer = http.createServer((request, response) => {
     let pathname;
     try {
-      pathname = new URL(request.url || "/", "http://localhost").pathname;
+      pathname = new URL(request.url || "/", "https://socket.sanjakarobar.com").pathname;
     } catch {
       response.writeHead(400, { "Content-Type": "application/json; charset=utf-8" });
       response.end(JSON.stringify({ error: "Bad request" }));
